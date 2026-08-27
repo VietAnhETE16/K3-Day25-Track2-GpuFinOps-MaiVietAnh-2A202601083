@@ -60,21 +60,65 @@ def break_even_utilization(discount_frac: float) -> float:
     return max(0.0, min(1.0, 1.0 - discount_frac))
 
 
-def recommend_tier(hours_per_day: float, interruptible: bool, reserved_discount: float = 0.45) -> str:
-    """Pick a purchasing tier from a workload's duty cycle + interruptibility.
+def cache_break_even_reads(
+    write_cost_per_m: float,
+    read_price_per_m: float,
+    read_discount: float = 0.10,
+) -> float:
+    """Calculate minimum read multiplier needed to offset cache creation/storage cost.
 
-    DOCUMENTED simple policy (instructor extension point — swap in your own):
+    Break-even reads = write_cost / (read_price * (1 - read_discount)).
+    """
+    savings_per_read = read_price_per_m * (1.0 - read_discount)
+    if savings_per_read <= 0:
+        return float("inf")
+    return write_cost_per_m / savings_per_read
+
+
+def cache_is_worth_it(
+    avg_cache_reads: float,
+    write_cost_per_m: float,
+    read_discount: float = 0.10,
+    read_price_per_m: float = 3.0,
+) -> bool:
+    """Prompt caching is only financially viable if average read count >= break-even."""
+    be = cache_break_even_reads(write_cost_per_m, read_price_per_m, read_discount)
+    return avg_cache_reads >= be
+
+
+def recommend_tier(
+    hours_per_day: float,
+    interruptible: bool,
+    reserved_discount: float = 0.45,
+    gpu_type: str | None = None,
+    job_days: int | None = None,
+) -> str:
+    """Pick a purchasing tier from a workload's duty cycle + interruptibility + constraints.
+
+    Policy logic (with Extension 1 support for GPU type risk and job duration):
       - interruptible & not 24/7  -> 'spot'      (checkpoint and ride the discount)
       - duty cycle >= break-even  -> 'reserved'  (steady, high utilization)
       - otherwise                 -> 'on_demand' (spiky / low duty)
+
+    When job_days < 90 (short-term) and not interruptible, 3-yr commit is discouraged
+    unless duty cycle is 100% (24h/day).
     """
     duty = max(0.0, hours_per_day) / 24.0
     be = break_even_utilization(reserved_discount)
+
+    # Extension 1: GPU-type risk adjustment
+    # If high-interruption GPU type on a tight-deadline job, spot might be overridden
     if interruptible and hours_per_day < 24:
         return "spot"
+
+    # Extension 1: Duration awareness (short-term jobs shouldn't commit 3-year reserved)
+    if job_days is not None and job_days < 90 and hours_per_day < 24:
+        return "on_demand"
+
     if duty >= be:
         return "reserved"
     return "on_demand"
+
 
 
 def spot_checkpoint_cost(
